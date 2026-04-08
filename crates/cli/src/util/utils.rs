@@ -341,7 +341,7 @@ pub async fn fund_account(
         tx_type,
         gas_price,
         gas_price / 10,
-        21000,
+        40000,
         chain_id,
         blob_gas_price,
     );
