@@ -318,6 +318,32 @@ pub struct SpamCliArgs {
     )]
     pub send_raw_tx_sync: bool,
 
+    /// Don't block on eth_sendRawTransaction responses before sending the next batch.
+    #[arg(
+        long = "no-wait-for-sends",
+        default_value_t = false,
+        long_help = "Don't wait for eth_sendRawTransaction to return before preparing the next \
+                     batch. Some sequencers (e.g. Arbitrum Nitro) only return sendRawTransaction \
+                     after the tx is included in a block, causing a sawtooth throughput pattern. \
+                     Use with --max-concurrent-sends to cap the number of in-flight calls. \
+                     NOTE: per-tx nonce/gas corrections are skipped in this mode.",
+        help_heading = HELP_HEADING_PAYLOAD,
+    )]
+    pub no_wait_for_sends: bool,
+
+    /// Max number of concurrent in-flight eth_sendRawTransaction calls.
+    #[arg(
+        long = "max-concurrent-sends",
+        value_name = "N",
+        default_value_t = 10_000,
+        long_help = "Maximum number of eth_sendRawTransaction calls that may be in-flight at once. \
+                     Each call acquires a permit before sending and releases it when the RPC returns. \
+                     Primarily useful with --no-wait-for-sends to prevent flooding the sequencer \
+                     queue and causing nonce errors.",
+        help_heading = HELP_HEADING_PAYLOAD,
+    )]
+    pub max_concurrent_sends: usize,
+
     #[arg(
         long = "timeout",
         long_help = "The time to wait for spammer to recover from failure before stopping contender. NOTE: this flag is deprecated and currently does nothing. It will be removed in a future release.",
@@ -630,6 +656,8 @@ impl SpamCommandArgs {
                 .clone(),
             send_raw_tx_sync: self.spam_args.send_raw_tx_sync,
             flashblocks_ws_url: self.spam_args.flashblocks_ws_url.clone(),
+            no_wait_for_sends: self.spam_args.no_wait_for_sends,
+            max_concurrent_sends: self.spam_args.max_concurrent_sends,
         };
         let mut test_scenario = TestScenario::new(
             testconfig,
@@ -1220,6 +1248,8 @@ mod tests {
                     skip_setup: false,
                     rpc_batch_size: 0,
                     send_raw_tx_sync: false,
+                    no_wait_for_sends: false,
+                    max_concurrent_sends: 10_000,
                     spam_timeout: Duration::from_secs(5),
                     flashblocks_ws_url: None,
                     report_interval: None,
@@ -1398,6 +1428,8 @@ mod tests {
             skip_setup: false,
             rpc_batch_size: 0,
             send_raw_tx_sync: false,
+            no_wait_for_sends: false,
+            max_concurrent_sends: 10_000,
             spam_timeout: Duration::from_secs(5),
             flashblocks_ws_url: None,
             report_interval: None,

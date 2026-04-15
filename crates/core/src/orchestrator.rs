@@ -56,6 +56,8 @@ where
     pub rpc_batch_size: u64,
     pub scenario_label: Option<String>,
     pub send_raw_tx_sync: bool,
+    pub no_wait_for_sends: bool,
+    pub max_concurrent_sends: usize,
 }
 
 impl<P> ContenderCtx<MockDb, RandSeed, P>
@@ -121,6 +123,8 @@ where
             rpc_batch_size: 0,
             scenario_label: None,
             send_raw_tx_sync: false,
+            no_wait_for_sends: false,
+            max_concurrent_sends: 10_000,
         }
     }
 }
@@ -196,6 +200,8 @@ where
             rpc_batch_size: 0,
             scenario_label: None,
             send_raw_tx_sync: false,
+            no_wait_for_sends: false,
+            max_concurrent_sends: 10_000,
         }
     }
 
@@ -216,6 +222,8 @@ where
             scenario_label: self.scenario_label.clone(),
             send_raw_tx_sync: self.send_raw_tx_sync,
             flashblocks_ws_url: None,
+            no_wait_for_sends: self.no_wait_for_sends,
+            max_concurrent_sends: self.max_concurrent_sends,
         };
 
         TestScenario::new(
@@ -256,6 +264,8 @@ where
     rpc_batch_size: u64,
     scenario_label: Option<String>,
     send_raw_tx_sync: bool,
+    no_wait_for_sends: bool,
+    max_concurrent_sends: usize,
 }
 
 impl<D, S, P> ContenderCtxBuilder<D, S, P>
@@ -337,6 +347,8 @@ where
             rpc_batch_size: self.rpc_batch_size,
             scenario_label: self.scenario_label,
             send_raw_tx_sync: self.send_raw_tx_sync,
+            no_wait_for_sends: self.no_wait_for_sends,
+            max_concurrent_sends: self.max_concurrent_sends,
         }
     }
 }

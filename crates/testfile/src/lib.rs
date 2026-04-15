@@ -316,6 +316,8 @@ pub mod tests {
                 scenario_label: None,
                 send_raw_tx_sync: false,
                 flashblocks_ws_url: None,
+                no_wait_for_sends: false,
+                max_concurrent_sends: 10_000,
             },
             None,
             (&PROM, &HIST).into(),
@@ -371,6 +373,8 @@ pub mod tests {
                 scenario_label: None,
                 send_raw_tx_sync: false,
                 flashblocks_ws_url: None,
+                no_wait_for_sends: false,
+                max_concurrent_sends: 10_000,
             },
             None,
             (&PROM, &HIST).into(),
@@ -396,6 +400,8 @@ pub mod tests {
                 scenario_label: None,
                 send_raw_tx_sync: false,
                 flashblocks_ws_url: None,
+                no_wait_for_sends: false,
+                max_concurrent_sends: 10_000,
             },
             None,
             (&PROM, &HIST).into(),
@@ -497,6 +503,8 @@ value = \"1eth\"
             scenario_label: None,
             send_raw_tx_sync: false,
             flashblocks_ws_url: None,
+            no_wait_for_sends: false,
+            max_concurrent_sends: 10_000,
         }
     }
 

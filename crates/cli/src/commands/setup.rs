@@ -114,6 +114,8 @@ pub async fn setup(
         scenario_label: args.eth_json_rpc_args.scenario_label,
         send_raw_tx_sync: false,
         flashblocks_ws_url: None,
+        no_wait_for_sends: false,
+        max_concurrent_sends: 10_000,
     };
 
     let mut scenario = TestScenario::new(

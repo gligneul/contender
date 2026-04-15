@@ -122,6 +122,31 @@ pub struct CampaignCliArgs {
     )]
     pub send_raw_tx_sync: bool,
 
+    /// Don't block on eth_sendRawTransaction responses before sending the next batch.
+    #[arg(
+        long = "no-wait-for-sends",
+        default_value_t = false,
+        long_help = "Don't wait for eth_sendRawTransaction to return before preparing the next \
+                     batch. Some sequencers (e.g. Arbitrum Nitro) only return sendRawTransaction \
+                     after the tx is included in a block, causing a sawtooth throughput pattern. \
+                     Use with --max-concurrent-sends to cap the number of in-flight calls. \
+                     NOTE: per-tx nonce/gas corrections are skipped in this mode.",
+        help_heading = HELP_HEADING_PAYLOAD,
+    )]
+    pub no_wait_for_sends: bool,
+
+    /// Max number of concurrent in-flight eth_sendRawTransaction calls.
+    #[arg(
+        long = "max-concurrent-sends",
+        value_name = "N",
+        default_value_t = 10_000,
+        long_help = "Maximum number of eth_sendRawTransaction calls that may be in-flight at once. \
+                     Primarily useful with --no-wait-for-sends to prevent flooding the sequencer \
+                     queue and causing nonce errors.",
+        help_heading = HELP_HEADING_PAYLOAD,
+    )]
+    pub max_concurrent_sends: usize,
+
     /// Run campaign in a loop, indefinitely.
     #[arg(
         global = true,
@@ -375,6 +400,8 @@ fn create_spam_cli_args(
         skip_setup,
         rpc_batch_size: args.rpc_batch_size,
         send_raw_tx_sync: args.send_raw_tx_sync,
+        no_wait_for_sends: args.no_wait_for_sends,
+        max_concurrent_sends: args.max_concurrent_sends,
         spam_timeout: args.spam_timeout,
         flashblocks_ws_url: args.flashblocks_ws_url.clone(),
         report_interval: None,

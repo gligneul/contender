@@ -188,6 +188,13 @@ where
     pub scenario_label: Option<String>,
     /// Use `eth_sendRawTransactionSync` instead of `eth_sendRawTransaction`.
     pub send_raw_tx_sync: bool,
+    /// When true, spam task handles are dropped immediately rather than awaited.
+    /// Use for sequencers (e.g. Arbitrum Nitro) where sendRawTransaction blocks until inclusion.
+    pub no_wait_for_sends: bool,
+    /// Maximum number of concurrent in-flight eth_sendRawTransaction calls.
+    pub max_concurrent_sends: usize,
+    /// Semaphore limiting concurrent in-flight eth_sendRawTransaction calls.
+    send_semaphore: Arc<tokio::sync::Semaphore>,
     /// Shared HTTP client so spawned tasks reuse one connection pool.
     http_client: reqwest::Client,
     /// Cached gas price from the last successful RPC fetch, used as fallback on transient errors.
@@ -211,6 +218,8 @@ pub struct TestScenarioParams {
     pub scenario_label: Option<String>,
     pub send_raw_tx_sync: bool,
     pub flashblocks_ws_url: Option<Url>,
+    pub no_wait_for_sends: bool,
+    pub max_concurrent_sends: usize,
 }
 
 pub struct SpamRunContext<'a, F: SpamCallback + 'static> {
@@ -283,6 +292,8 @@ where
             scenario_label,
             send_raw_tx_sync,
             flashblocks_ws_url,
+            no_wait_for_sends,
+            max_concurrent_sends,
         } = params;
         let agent_store = config.build_agent_store(&rand_seed, agent_spec.clone());
 
@@ -406,6 +417,9 @@ where
             gas_price,
             scenario_label,
             send_raw_tx_sync,
+            no_wait_for_sends,
+            max_concurrent_sends,
+            send_semaphore: Arc::new(tokio::sync::Semaphore::new(max_concurrent_sends)),
             http_client: reqwest::Client::new(),
             last_fetched_gas_price: None,
             last_fetched_blob_gas_price: None,
@@ -530,6 +544,8 @@ where
                 scenario_label: self.scenario_label.clone(),
                 send_raw_tx_sync: self.send_raw_tx_sync,
                 flashblocks_ws_url: None,
+                no_wait_for_sends: self.no_wait_for_sends,
+                max_concurrent_sends: self.max_concurrent_sends,
             },
             None,
             (&PROM, &HIST).into(),
@@ -1112,8 +1128,15 @@ where
                 let http_client = self.http_client.clone();
                 let rpc_url = self.rpc_url.clone();
                 let hist = self.prometheus.hist.get().cloned();
+                let semaphore = self.send_semaphore.clone();
 
                 tasks.push(tokio::task::spawn(async move {
+                // Acquire a send permit before calling the RPC. If the semaphore is closed
+                // (e.g. TestScenario was dropped), exit the task cleanly.
+                let _permit = match semaphore.acquire().await {
+                    Ok(p) => p,
+                    Err(_) => return,
+                };
                 let extra = RuntimeTxInfo::now();
                 let handles = match payload {
                     ExecutionPayload::SignedTx(signed_tx, req) if send_raw_tx_sync => {
@@ -1355,7 +1378,14 @@ where
                 .collect();
 
             let hist = self.prometheus.hist.get();
+            let semaphore = self.send_semaphore.clone();
             tasks.push(tokio::task::spawn(async move {
+                // Acquire a send permit before calling the RPC. If the semaphore is closed
+                // (e.g. TestScenario was dropped), exit the task cleanly.
+                let _permit = match semaphore.acquire().await {
+                    Ok(p) => p,
+                    Err(_) => return,
+                };
                 // Build json-rpc batch payload with multiple eth_sendRawTransaction requests
                 let mut requests = Vec::with_capacity(signed_chunk.len());
                 for (i, (signed_tx, _)) in signed_chunk.iter().enumerate() {
@@ -1533,84 +1563,92 @@ where
             tick,
         } = batch;
 
-        // wait for spam txs to finish sending
-        for task in spam_tasks {
-            tokio::select! {
-                res = task => {
-                    if let Err(e) = res {
-                        tracing::trace!("spam task abandoned: {e:?}");
-                        num_tasks -= 1;
-                    }
-                },
-                Some(err) = error_receiver.recv() => {
-                    return Err(err);
-                }
-                _ = self.ctx.cancel_token.cancelled() => {
-                    break;
-                }
-            }
-        }
-
-        // wait for the on_batch_sent callback to finish
-        if let Some(task) = sent_tx_callback.on_batch_sent() {
-            task.await.map_err(CallbackError::Join)??;
-        }
-
-        info!("[{tick}] executed {num_tasks} spam tasks");
-
-        // increase gas price if needed
-        add_gas_receiver.close();
-        let starting_gas_adder = self.ctx.gas_price_adder;
-        while let Some(gas) = add_gas_receiver.recv().await {
-            if self.ctx.gas_price_adder >= gas as i128 + starting_gas_adder {
-                continue;
-            }
-            debug!("incrementing gas price by {gas}");
-            self.ctx.add_to_gas_price(gas as i128);
-        }
-
-        // shift nonces if needed
-        // Accumulate all nonce adjustments per address to avoid race conditions
-        // where multiple updates for the same address read stale nonce values
-        shift_nonce_receiver.close();
-        let mut nonce_adjustments: HashMap<Address, i32> = HashMap::new();
-        while let Some((addr, shift)) = shift_nonce_receiver.recv().await {
-            *nonce_adjustments.entry(addr).or_insert(0) += shift;
-        }
-
-        // Apply accumulated adjustments
-        for (addr, total_shift) in nonce_adjustments {
-            let current_nonce = self.nonces.get(&addr).copied().unwrap_or_default();
-            let new_nonce = if total_shift < 0 {
-                current_nonce.saturating_sub(total_shift.unsigned_abs() as u64)
-            } else {
-                current_nonce.saturating_add(total_shift as u64)
-            };
-            debug!(
-                "nonce for {} adjusted by {} (from {} to {})",
-                addr, total_shift, current_nonce, new_nonce
-            );
-            self.nonces.insert(addr, new_nonce);
-        }
-
-        // decrease gas price if all txs were sent successfully
-        success_receiver.close();
-        let mut success_count = 0;
-        while success_receiver.recv().await.is_some() {
-            success_count += 1;
-        }
-        if success_count == num_payloads {
-            info!("all spam txs sent successfully");
-            if self.ctx.gas_price_adder > 0 {
-                // remove 10% of the gas price adder
-                self.ctx.add_to_gas_price(self.ctx.gas_price_adder / -10);
-            }
+        if self.no_wait_for_sends {
+            // Drop handles — tasks keep running in the background, throttled only by the
+            // send_semaphore. Channel send errors inside tasks are already handled gracefully
+            // (warn/debug logs), so dropping the receivers here is safe.
+            drop(spam_tasks);
+            info!("[{tick}] launched {num_tasks} spam tasks (no-wait-for-sends mode)");
         } else {
-            warn!(
-                "some spam txs failed to send: {} / {}",
-                num_payloads - success_count,
-                num_payloads
-            );
+            // wait for spam txs to finish sending
+            for task in spam_tasks {
+                tokio::select! {
+                    res = task => {
+                        if let Err(e) = res {
+                            tracing::trace!("spam task abandoned: {e:?}");
+                            num_tasks -= 1;
+                        }
+                    },
+                    Some(err) = error_receiver.recv() => {
+                        return Err(err);
+                    }
+                    _ = self.ctx.cancel_token.cancelled() => {
+                        break;
+                    }
+                }
+            }
+
+            // wait for the on_batch_sent callback to finish
+            if let Some(task) = sent_tx_callback.on_batch_sent() {
+                task.await.map_err(CallbackError::Join)??;
+            }
+
+            info!("[{tick}] executed {num_tasks} spam tasks");
+
+            // increase gas price if needed
+            add_gas_receiver.close();
+            let starting_gas_adder = self.ctx.gas_price_adder;
+            while let Some(gas) = add_gas_receiver.recv().await {
+                if self.ctx.gas_price_adder >= gas as i128 + starting_gas_adder {
+                    continue;
+                }
+                debug!("incrementing gas price by {gas}");
+                self.ctx.add_to_gas_price(gas as i128);
+            }
+
+            // shift nonces if needed
+            // Accumulate all nonce adjustments per address to avoid race conditions
+            // where multiple updates for the same address read stale nonce values
+            shift_nonce_receiver.close();
+            let mut nonce_adjustments: HashMap<Address, i32> = HashMap::new();
+            while let Some((addr, shift)) = shift_nonce_receiver.recv().await {
+                *nonce_adjustments.entry(addr).or_insert(0) += shift;
+            }
+
+            // Apply accumulated adjustments
+            for (addr, total_shift) in nonce_adjustments {
+                let current_nonce = self.nonces.get(&addr).copied().unwrap_or_default();
+                let new_nonce = if total_shift < 0 {
+                    current_nonce.saturating_sub(total_shift.unsigned_abs() as u64)
+                } else {
+                    current_nonce.saturating_add(total_shift as u64)
+                };
+                debug!(
+                    "nonce for {} adjusted by {} (from {} to {})",
+                    addr, total_shift, current_nonce, new_nonce
+                );
+                self.nonces.insert(addr, new_nonce);
+            }
+
+            // decrease gas price if all txs were sent successfully
+            success_receiver.close();
+            let mut success_count = 0;
+            while success_receiver.recv().await.is_some() {
+                success_count += 1;
+            }
+            if success_count == num_payloads {
+                info!("all spam txs sent successfully");
+                if self.ctx.gas_price_adder > 0 {
+                    // remove 10% of the gas price adder
+                    self.ctx.add_to_gas_price(self.ctx.gas_price_adder / -10);
+                }
+            } else {
+                warn!(
+                    "some spam txs failed to send: {} / {}",
+                    num_payloads - success_count,
+                    num_payloads
+                );
+            }
         }
 
         Ok(())
@@ -1675,6 +1713,8 @@ where
                 scenario_label: self.scenario_label.clone(),
                 send_raw_tx_sync: self.send_raw_tx_sync,
                 flashblocks_ws_url: None,
+                no_wait_for_sends: self.no_wait_for_sends,
+                max_concurrent_sends: self.max_concurrent_sends,
             },
             None,
             (&PROM, &HIST).into(),
@@ -2285,6 +2325,8 @@ pub mod tests {
                 scenario_label: None,
                 send_raw_tx_sync: false,
                 flashblocks_ws_url: None,
+                no_wait_for_sends: false,
+                max_concurrent_sends: 10_000,
             },
             None,
             (&PROM, &HIST).into(),
@@ -2827,6 +2869,8 @@ pub mod tests {
                 scenario_label: None,
                 send_raw_tx_sync: false,
                 flashblocks_ws_url: None,
+                no_wait_for_sends: false,
+                max_concurrent_sends: 10_000,
             },
             None,
             (&PROM, &HIST).into(),
