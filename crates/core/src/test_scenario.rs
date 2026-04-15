@@ -883,15 +883,15 @@ where
             .get(&from)
             .ok_or(RuntimeErrorKind::NonceMissing(from))?
             .to_owned();
-        let setcode_signer_addr = self.setcode_signer.address();
-        let setcode_signer_nonce = self
-            .nonces
-            .get(&setcode_signer_addr)
-            .ok_or(RuntimeErrorKind::NonceMissing(from))?
-            .to_owned();
 
         self.nonces.insert(from.to_owned(), nonce + 1);
         if tx_req.authorization_list.is_some() {
+            let setcode_signer_addr = self.setcode_signer.address();
+            let setcode_signer_nonce = self
+                .nonces
+                .get(&setcode_signer_addr)
+                .ok_or(RuntimeErrorKind::NonceMissing(setcode_signer_addr))?
+                .to_owned();
             self.nonces
                 .insert(setcode_signer_addr, setcode_signer_nonce + 1);
         }
