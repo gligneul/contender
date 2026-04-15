@@ -28,7 +28,7 @@ use tokio::sync::Semaphore;
 use tracing::{debug, info, warn};
 
 /// Maximum number of concurrent funding tasks to avoid overwhelming the RPC with connections.
-const FUNDING_CONCURRENCY_LIMIT: usize = 1000;
+const FUNDING_CONCURRENCY_LIMIT: usize = 25;
 
 pub const DEFAULT_PRV_KEYS: [&str; 10] = [
     "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80",
@@ -223,10 +223,23 @@ pub async fn fund_accounts(
         let fund_with = fund_with.to_owned();
         let sender = sender_pending_tx.clone();
         let rpc_client = rpc_client.clone();
-        let sem = semaphore.clone();
+
+        // Acquire the permit in the main loop *before* spawning so that tasks are
+        // always launched in nonce order. If the permit were acquired inside the
+        // spawned task, the scheduler could let task N+1 acquire a permit before
+        // task N, leaving a gap in the in-flight nonce window. On sequencers like
+        // Arbitrum Nitro, where sendRawTransaction blocks until inclusion, that gap
+        // causes a deadlock: the in-flight tasks wait for nonce N to be included,
+        // but nonce N is stuck waiting for a permit that won't be freed until those
+        // tasks complete.
+        let permit = semaphore
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("semaphore closed");
 
         fund_handles.push(tokio::task::spawn(async move {
-            let _permit = sem.acquire().await.expect("semaphore closed");
+            let _permit = permit;
             match fund_account(
                 &fund_with,
                 address,
