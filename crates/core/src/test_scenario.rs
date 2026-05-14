@@ -975,6 +975,9 @@ where
                     })
                     .await?;
                 let adjusted_gas_price = |price: u128| {
+                    // 2x multiplier gives headroom for EIP-1559 base fee increases
+                    // (base fee can rise up to 12.5% per block, so 2x covers ~6 blocks of growth)
+                    let price = price * 2;
                     if self.ctx.gas_price_adder < 0 {
                         price - self.ctx.gas_price_adder.unsigned_abs()
                     } else {
